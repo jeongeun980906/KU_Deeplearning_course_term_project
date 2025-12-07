@@ -15,7 +15,7 @@ from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.ops.misc import FrozenBatchNorm2d
 
 from lerobot.common.policies.pretrained import PreTrainedPolicy
-from lerobot.common.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+from lerobot.common.constants import ACTION, OBS_ENV_STATE, OBS_IMAGE, OBS_IMAGES, OBS_STATE
 
 from .configuration import BaselineConfig
 from transformers import AutoImageProcessor, AutoModel
@@ -23,8 +23,10 @@ from lerobot.common.policies.normalize import Normalize, Unnormalize
 
 class BaselinePolicy(PreTrainedPolicy):
     """
-    Action Chunking Transformer Policy as per Learning Fine-Grained Bimanual Manipulation with Low-Cost
-    Hardware (paper: https://huggingface.co/papers/2304.13705, code: https://github.com/tonyzhaozh/act)
+    Baseline policy using either MLP or Transformer backbone to map from observations to action chunks.
+    The model can process image inputs through a visual encoder and concatenate them with robot state
+    and environment object state inputs. The model outputs action chunks which can be used to interact
+    with the environment.
     """
 
     config_class = BaselineConfig
@@ -61,8 +63,7 @@ class BaselinePolicy(PreTrainedPolicy):
         self.reset()
 
     def get_optim_params(self) -> dict:
-        # TODO(aliberts, rcadene): As of now, lr_backbone == lr
-        # Should we remove this and just `return self.parameters()`?
+        # return parameters for optimizer
         return [
             {
                 "params": [
@@ -89,8 +90,7 @@ class BaselinePolicy(PreTrainedPolicy):
         # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
         batch = self.normalize_inputs(batch)
         if self.config.image_features:
-            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch["observation.images"] = [batch[key] for key in self.config.image_features]
+            batch = dict(batch)  
         if len(self._action_queue) == 0:
             actions = self.model(batch)[0][: self.config.n_action_steps, :]
             actions = self.unnormalize_outputs({ACTION: actions})[ACTION]
@@ -105,7 +105,6 @@ class BaselinePolicy(PreTrainedPolicy):
         """Run the batch through the model and compute the loss for training or validation."""
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
-            batch[OBS_IMAGES] = [batch[key] for key in self.config.image_features]
         
         batch = self.normalize_targets(batch)
         actions = self.model(batch)
@@ -157,7 +156,7 @@ class TransformerModel(nn.Module):
         '''
         features = []
         if self.config.image_features:
-            images = batch[OBS_IMAGES]   # list of [B, C, H, W]
+            images = batch[OBS_IMAGE]   # list of [B, C, H, W]
             visual_features = self.visual_encoder(images)  # [B, projection_dim]
             features.append(visual_features)
         if self.config.robot_state_feature:
@@ -206,7 +205,7 @@ class BaselineModel(nn.Module):
         input_dim = 0
         if self.config.image_features:
             self.visual_encoder = VisualEncoder(config)
-            input_dim += config.projection_dim
+            input_dim += self.visual_encoder.output_dim
         if self.config.robot_state_feature:
             input_dim += self.config.robot_state_feature.shape[0]
         if self.config.env_state_feature:
@@ -239,7 +238,7 @@ class BaselineModel(nn.Module):
         '''
         features = []
         if self.config.image_features:
-            images = batch[OBS_IMAGES]   # list of [B, C, H, W]
+            images = batch[OBS_IMAGE]   # list of [B, C, H, W]
             visual_features = self.visual_encoder(images)  # [B, projection_dim]
             features.append(visual_features)
         if self.config.robot_state_feature:
@@ -271,26 +270,27 @@ class VisualEncoder(nn.Module):
             device_map="auto", 
         )
         self.num_cams = len(cfg.image_features)
-        self.feature_dim = self.model.config.hidden_size
-        self.projection = nn.Linear(self.feature_dim*self.num_cams, cfg.projection_dim)
+        if cfg.projection_dim > 0:
+            self.feature_dim = self.model.config.hidden_size
+            self.projection = nn.Linear(self.feature_dim, cfg.projection_dim)
+            self.output_dim = cfg.projection_dim
+        else:
+            self.projection = nn.Identity()
+            print(f"Using concatenated features without projection: {self.model.config.hidden_size * self.num_cams}")
+            self.output_dim = self.model.config.hidden_size
         if cfg.freeze_backbone:
             for param in self.model.parameters():
                 param.requires_grad = False
 
     def forward(self, image: list[Tensor]) -> Tensor:
         '''
-        Input: [B, C, H, W] * num_cams
-        Output: [B, num_cams X D]
+        Input: [B, C, H, W] 
+        Output: [B, D]
         '''
-        num_cams = len(image)
-        batch_size = image[0].shape[0]
-        inputs = self.processor(images=image, return_tensors="pt").to(self.model.device)
+        inputs = self.processor(images=image, return_tensors="pt",do_rescale=False).to(self.model.device)
         with torch.inference_mode():
             outputs = self.model(**inputs)
         
-        pooled_output = outputs.pooler_output # [Bxnum_cams, D] <- [B,D] stack num_cams times
-        reshaped_output = pooled_output.view(num_cams, batch_size, -1)
-        reshaped_output = reshaped_output.permute(1, 0, 2)       # [B, num_cams, D]
-        features = reshaped_output.flatten(start_dim=1)              # [B, num_cams X D]
-        projected_features = self.projection(features)           # [B, projection_dim]
+        pooled_output = outputs.pooler_output # [B, D] <- [B,D] stack num_cams times
+        projected_features = self.projection(pooled_output)           # [B, projection_dim]
         return projected_features

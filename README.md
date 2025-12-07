@@ -146,14 +146,53 @@ Action Representation: Target Joint Position, State Representation: Current Join
     <tr>
     <th>  MLP with GT Object Pose </th>
     <th>  MLP with Image (DINOv3 feature)</th>
-    <th> smolVLA</th>
+    <th> SmolVLA with Image</th>
     </tr>
     <tr>
     <th>  65%</th>
-    <th>  </th>
-    <th> </th>
+    <th> 60% </th>
+    <th>65%</th>
     </tr>
 </table>
+
+## Try with your own policy
+Look at [src/policies/how_to.md](./src/policies/how_to.md) for instructions. 
+
+
+For training change [3.train.ipynb](3.train.ipynb)
+```python 
+from src.policies.baseline.configuration import BaselineConfig
+from src.policies.baseline.modeling import BaselinePolicy
+```
+to your own path in  in **first** cell and
+
+```python
+cfg = BaselineConfig(
+    chunk_size=10,
+    n_action_steps=10,
+
+)
+```
+change configuration class in **second** cell.
+```python
+'''`
+Instantiate Policy
+'''
+policy = BaselinePolicy(**kwargs)
+```
+Finally, change policy class in **fourth** cell.
+
+
+For evaluation [4.eval.ipynb](4.eval.ipynb) , change 
+```python
+from src.policies.baseline.modeling import BaselinePolicy
+```
+to your own path in **first** cell and
+```python
+policy = BaselinePolicy.from_pretrained(CKPT, **kwargs)
+```
+change policy class in the **third** cell. 
+
 
 ## Others
 
